@@ -1,0 +1,33 @@
+services:
+  api:
+    build:
+      context: .
+      target: runtime
+    image: mmm-optimizer:latest
+    ports:
+      - "${HOST_PORT:-8000}:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_ENV: ${APP_ENV:-docker}
+    volumes:
+      - mmm-storage:/srv/storage   # uploaded datasets + model artifacts survive restarts
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  tests:
+    build:
+      context: .
+      target: test
+    profiles: ["test"]
+    environment:
+      STORAGE_DIR: /tmp/storage
+      LOG_LEVEL: WARNING
+
+volumes:
+  mmm-storage:

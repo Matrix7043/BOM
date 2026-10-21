@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mix Optimizer</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%233d9cf0'/%3E%3Cpath d='M9 21V11l7 6 7-6v10' stroke='white' stroke-width='3' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <script>
+    // Apply the saved theme before first paint to avoid a flash.
+    try { const t = localStorage.getItem("mmm-theme"); if (t) document.documentElement.dataset.theme = t; } catch {}
+  </script>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="app">
+  <!-- ============ Top bar ============ -->
+  <header class="topbar">
+    <div class="brand">
+      <button class="icon-btn menu-btn" id="menu-btn" aria-label="Open navigation" data-icon="menu"></button>
+      <span class="logo" aria-hidden="true">M</span>
+      <span class="brand-name">MixOptimizer</span>
+    </div>
+
+    <label class="dataset-picker">
+      <span class="picker-icon" data-icon="database"></span>
+      <span class="sr-only">Dataset</span>
+      <select id="dataset" aria-label="Dataset"></select>
+    </label>
+
+    <div class="top-actions">
+      <span class="health" id="status" title="API health">
+        <span class="dot"></span><span id="status-text">checking…</span>
+      </span>
+      <div class="theme-toggle" role="group" aria-label="Colour theme">
+        <span data-icon="sun"></span>
+        <button class="switch" id="theme-switch" role="switch" aria-checked="true" aria-label="Dark mode"><span></span></button>
+        <span data-icon="moon"></span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ============ Sidebar ============ -->
+  <nav class="sidebar" id="sidebar" aria-label="Main">
+    <p class="nav-label">Planning</p>
+    <a class="nav-item active" href="#optimizer" data-nav="optimizer"><span data-icon="grid"></span>Optimizer</a>
+    <a class="nav-item" href="#model" data-nav="model"><span data-icon="chart"></span>Model card</a>
+    <a class="nav-item" href="#datasets" data-nav="datasets"><span data-icon="database"></span>Datasets</a>
+    <p class="nav-label">Operations</p>
+    <a class="nav-item" href="#monitoring" data-nav="monitoring"><span data-icon="activity"></span>Monitoring</a>
+    <a class="nav-item" href="/docs" target="_blank" rel="noopener"><span data-icon="book"></span>API docs</a>
+    <div class="sidebar-foot">
+      <p class="muted small">sqrt-OLS · SLSQP · SHAP</p>
+      <p class="muted small" id="version"></p>
+    </div>
+  </nav>
+  <div class="scrim" id="scrim"></div>
+
+  <!-- ============ Main ============ -->
+  <main class="main">
+
+    <!-- ---------- Optimizer ---------- -->
+    <section class="view" data-view="optimizer">
+      <div class="page-head">
+        <div>
+          <h1>Budget Optimizer</h1>
+          <p class="crumbs">Home <span>·</span> <span id="crumb-dataset">—</span></p>
+        </div>
+        <span class="chip" id="solver-chip" hidden></span>
+      </div>
+
+      <div class="card controls">
+        <div class="segmented" role="tablist" aria-label="Mode">
+          <button class="seg active" data-mode="optimize" role="tab" aria-selected="true"><span data-icon="target"></span>Optimise budget</button>
+          <button class="seg" data-mode="predict" role="tab" aria-selected="false"><span data-icon="sliders"></span>Test my split</button>
+        </div>
+
+        <form id="optimize-form" class="mode-form" data-mode="optimize">
+          <label class="money-input">
+            <span class="label">Total budget</span>
+            <span class="input-wrap"><span class="prefix" data-unit></span><input id="budget" type="number" min="0" step="any" required></span>
+          </label>
+          <button type="button" class="ghost-btn" id="toggle-constraints" aria-expanded="false"><span data-icon="sliders"></span>Constraints</button>
+          <button class="primary-btn" type="submit"><span data-icon="sparkle"></span>Optimise</button>
+          <div class="constraints hidden" id="constraints"></div>
+        </form>
+
+        <form id="predict-form" class="mode-form hidden" data-mode="predict">
+          <div class="split-inputs" id="split-inputs"></div>
+          <button class="primary-btn" type="submit"><span data-icon="play"></span>Evaluate</button>
+        </form>
+        <p class="error hidden" id="form-error" role="alert"></p>
+      </div>
+
+      <div class="grid-top">
+        <div class="kpi-grid">
+          <article class="card kpi">
+            <div class="kpi-head"><span class="kpi-value" id="k-sales">—</span><span class="pill" id="k-sales-pill"></span></div>
+            <p class="kpi-label" id="k-sales-label">Projected sales</p>
+            <div class="donut-row">
+              <div class="donut" id="donut"></div>
+              <ul class="donut-legend" id="donut-legend"></ul>
+            </div>
+          </article>
+
+          <article class="card kpi">
+            <div class="kpi-head"><span class="kpi-value" id="k-budget">—</span><span class="pill neutral" id="k-budget-pill"></span></div>
+            <p class="kpi-label">Total spend by channel</p>
+            <div class="mini-bars" id="mini-bars"></div>
+          </article>
+
+          <article class="card kpi">
+            <div class="kpi-head"><span class="kpi-value" id="k-r2">—</span><span class="pill neutral" id="k-r2-pill"></span></div>
+            <p class="kpi-label">Model fit (R²)</p>
+            <div class="progress-block">
+              <div class="progress-meta"><span id="k-r2-text">Variance explained</span><span id="k-r2-pct"></span></div>
+              <div class="progress"><span id="k-r2-bar"></span></div>
+            </div>
+          </article>
+
+          <article class="card kpi">
+            <div class="kpi-head"><span class="kpi-value" id="k-mroi">—</span></div>
+            <p class="kpi-label" id="k-mroi-label">Return on the next unit spent</p>
+            <p class="kpi-sub">Channels in the model</p>
+            <div class="avatars" id="avatars"></div>
+          </article>
+        </div>
+
+        <article class="card chart-card">
+          <div class="card-head">
+            <div><h2>Response curves</h2><p class="card-sub">Lift above baseline vs spend · dots mark this allocation</p></div>
+            <div class="legend" id="curves-legend"></div>
+          </div>
+          <div class="chart" id="curves"></div>
+        </article>
+      </div>
+
+      <div class="grid-bottom">
+        <article class="card">
+          <div class="card-head">
+            <div><h2 id="alloc-title">Allocation breakdown</h2><p class="card-sub">Select a channel to highlight it</p></div>
+          </div>
+          <div class="tiles" id="tiles" role="tablist" aria-label="Channels"></div>
+          <div class="table-wrap"><table class="table" id="alloc-table"></table></div>
+        </article>
+
+        <article class="card">
+          <div class="card-head">
+            <div><h2>SHAP attribution</h2><p class="card-sub" id="shap-sub">Contribution vs the average training prediction</p></div>
+          </div>
+          <div class="chart" id="shap"></div>
+          <p class="note" id="shap-note"></p>
+        </article>
+      </div>
+
+      <article class="card">
+        <div class="card-head">
+          <div><h2>Model justification</h2><p class="card-sub">Generated from p-values, SHAP and marginal ROI</p></div>
+        </div>
+        <div id="warnings"></div>
+        <ol class="justification" id="justification"><li class="muted">Run an optimisation to see the reasoning.</li></ol>
+      </article>
+    </section>
+
+    <!-- ---------- Model card ---------- -->
+    <section class="view hidden" data-view="model">
+      <div class="page-head"><div><h1>Model card</h1><p class="crumbs">Home <span>·</span> Model</p></div></div>
+      <div class="stat-row" id="model-stats"></div>
+      <article class="card">
+        <div class="card-head"><div><h2>Coefficients</h2><p class="card-sub" id="model-eq"></p></div></div>
+        <div class="table-wrap"><table class="table" id="coef-table"></table></div>
+        <p class="note" id="truth-note"></p>
+      </article>
+    </section>
+
+    <!-- ---------- Datasets ---------- -->
+    <section class="view hidden" data-view="datasets">
+      <div class="page-head"><div><h1>Datasets</h1><p class="crumbs">Home <span>·</span> Datasets</p></div></div>
+      <div class="dataset-grid" id="dataset-cards"></div>
+
+      <article class="card upload-card">
+        <div class="card-head"><div><h2>Upload your own data</h2>
+          <p class="card-sub">CSV with one row per period or market: a numeric sales column plus one spend column per channel.</p></div></div>
+        <form id="upload-form">
+          <label class="dropzone" id="dropzone">
+            <span data-icon="upload"></span>
+            <span id="file-label"><b>Choose a CSV</b> or drag it here</span>
+            <input id="file" type="file" accept=".csv,text/csv" required>
+          </label>
+          <div id="column-pickers" class="pickers hidden">
+            <label class="field">Sales column <select id="target"></select></label>
+            <label class="field">Dataset name <input id="ds-name" placeholder="My campaign data"></label>
+            <label class="field">Spend unit <input id="spend-unit" value="$"></label>
+            <label class="field">Sales unit <input id="sales-unit" value="units"></label>
+            <fieldset class="field wide"><legend>Spend channels</legend><div id="channel-picks" class="checks"></div></fieldset>
+            <button class="primary-btn" type="submit"><span data-icon="upload"></span>Upload &amp; train</button>
+          </div>
+        </form>
+        <p class="error hidden" id="upload-error" role="alert"></p>
+      </article>
+    </section>
+
+    <!-- ---------- Monitoring ---------- -->
+    <section class="view hidden" data-view="monitoring">
+      <div class="page-head">
+        <div><h1>Monitoring</h1><p class="crumbs">Home <span>·</span> Monitoring · refreshes every 10s</p></div>
+        <a class="ghost-btn" href="/metrics" target="_blank" rel="noopener"><span data-icon="external"></span>Raw /metrics</a>
+      </div>
+      <div class="stat-row" id="mon-stats"></div>
+      <div class="grid-bottom">
+        <article class="card">
+          <div class="card-head"><div><h2>Requests by route</h2><p class="card-sub">Since the server started</p></div></div>
+          <div class="table-wrap"><table class="table" id="mon-routes"></table></div>
+        </article>
+        <article class="card">
+          <div class="card-head"><div><h2>Models &amp; optimiser</h2><p class="card-sub">Per dataset</p></div></div>
+          <div class="table-wrap"><table class="table" id="mon-models"></table></div>
+        </article>
+      </div>
+    </section>
+  </main>
+</div>
+<div id="tooltip" class="tooltip hidden" role="tooltip"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
