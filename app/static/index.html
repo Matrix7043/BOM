@@ -79,6 +79,11 @@
             <span class="label">Total budget</span>
             <span class="input-wrap"><span class="prefix" data-unit></span><input id="budget" type="number" min="0" step="any" required></span>
           </label>
+          <label class="toggle" title="Never recommend more for a channel than the highest spend seen in the data">
+            <input type="checkbox" id="cap-observed" checked>
+            <span class="toggle-track" aria-hidden="true"><span></span></span>
+            <span>Stay within observed spend</span>
+          </label>
           <button type="button" class="ghost-btn" id="toggle-constraints" aria-expanded="false"><span data-icon="sliders"></span>Constraints</button>
           <button class="primary-btn" type="submit"><span data-icon="sparkle"></span>Optimise</button>
           <div class="constraints hidden" id="constraints"></div>
@@ -133,6 +138,26 @@
           <div class="chart" id="curves"></div>
         </article>
       </div>
+
+      <article class="card" id="compare-card">
+        <div class="card-head">
+          <div>
+            <h2>Plan comparison: worst and best case</h2>
+            <p class="card-sub" id="compare-sub">Same total budget as your current split</p>
+          </div>
+          <div class="legend compare-legend">
+            <span><span class="lg-dot"></span>Expected</span>
+            <span><span class="lg-band"></span>95% bound, expected sales</span>
+            <span><span class="lg-whisker"></span>95% range, single market</span>
+          </div>
+        </div>
+        <div class="compare-grid">
+          <div class="chart" id="forest"></div>
+          <div class="gains" id="gains"></div>
+        </div>
+        <ul class="compare-notes" id="compare-notes"></ul>
+        <p class="error hidden" id="compare-error" role="alert"></p>
+      </article>
 
       <div class="grid-bottom">
         <article class="card">

@@ -216,9 +216,11 @@ async function runOptimize() {
     if (min !== "" || max !== "") constraints[c] = { min: min === "" ? 0 : +min, max: max === "" ? null : +max };
   }
   try {
-    const r = await postJSON(`/api/datasets/${encodeURIComponent(state.ds.id)}/optimize`, { budget: +$("#budget").value, constraints });
+    const r = await postJSON(`/api/datasets/${encodeURIComponent(state.ds.id)}/optimize`,
+      { budget: +$("#budget").value, constraints, cap_to_observed: $("#cap-observed").checked });
     render(r);
   } catch (e) { setError("#form-error", e.message); }
+  runCompare();
 }
 
 async function runPredict() {
@@ -228,7 +230,124 @@ async function runPredict() {
   try {
     render(await postJSON(`/api/datasets/${encodeURIComponent(state.ds.id)}/predict`, { allocation }));
   } catch (e) { setError("#form-error", e.message); }
+  runCompare();
 }
+
+// ---------- plan comparison (worst / best case) ----------
+function currentSplit() {
+  const out = {};
+  $$("[data-split]").forEach((n) => (out[n.dataset.split] = +n.value || 0));
+  return out;
+}
+
+// Current is neutral; both optimised plans use the accent, and the unconstrained one is dashed because
+// its bound leans on extrapolating the curve.
+const PLAN_STYLE = {
+  current: { color: "var(--muted)", dash: "" },
+  capped: { color: "var(--accent)", dash: "" },
+  uncapped: { color: "var(--accent)", dash: "4 3" },
+};
+
+async function runCompare() {
+  setError("#compare-error");
+  try {
+    const r = await postJSON(`/api/datasets/${encodeURIComponent(state.ds.id)}/compare`, { current: currentSplit() });
+    const cur = r.plans[0].allocation;
+    $("#compare-sub").textContent = `Same ${money(r.budget)} budget as your current split (` +
+      state.ds.channels.map((c) => `${c} ${money(cur[c])}`).join(" · ") + "). Edit it under Test my split.";
+    renderForest(r);
+    renderGains(r);
+    $("#compare-notes").innerHTML = r.summary.map((s) => `<li>${esc(s)}</li>`).join("");
+  } catch (e) {
+    $("#forest").innerHTML = $("#gains").innerHTML = $("#compare-notes").innerHTML = "";
+    setError("#compare-error", e.message);
+  }
+}
+
+function extrapolationTag(p) {
+  if (!p.extrapolated?.length) return `<span class="tag safe">${icon("check")}Within observed data</span>`;
+  const w = p.extrapolated.reduce((a, b) => (b.ratio > a.ratio ? b : a));
+  return `<span class="tag risky">${icon("alert")}${esc(w.channel)} at ${w.ratio.toFixed(1)}× observed max</span>`;
+}
+
+function renderForest(r) {
+  const host = $("#forest");
+  host.innerHTML = "";
+  const plans = r.plans, ok = plans.filter((p) => !p.error), yu = state.ds.sales_unit;
+  const rowH = 74, W = 640, m = { t: 8, r: 64, b: 30, l: 168 };
+  const H = m.t + m.b + rowH * plans.length, iw = W - m.l - m.r;
+  const lo = Math.min(...ok.map((p) => p.prediction.low)), hi = Math.max(...ok.map((p) => p.prediction.high));
+  const step = niceMax((hi - lo) / 5), x0 = Math.floor(lo / step) * step, x1 = Math.ceil(hi / step) * step;
+  const sx = (v) => m.l + ((v - x0) / (x1 - x0)) * iw;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Expected sales per plan with 95% bounds" }, host);
+
+  const grid = el("g", { class: "grid-lines" }, svg);
+  for (let v = x0; v <= x1 + 1e-9; v += step) {
+    el("line", { x1: sx(v), x2: sx(v), y1: m.t, y2: H - m.b }, grid);
+    el("text", { x: sx(v), y: H - 8, "text-anchor": "middle" }, svg).textContent = fmt(v, step < 1 ? 1 : 0);
+  }
+  const base = plans[0].prediction?.mean;
+  if (base !== undefined) {
+    el("line", { x1: sx(base), x2: sx(base), y1: m.t, y2: H - m.b, style: "stroke:var(--muted);stroke-dasharray:3 3" }, svg);
+  }
+
+  plans.forEach((p, i) => {
+    const cy = m.t + i * rowH + rowH / 2, st = PLAN_STYLE[p.key] || PLAN_STYLE.current;
+    el("text", { x: 0, y: cy - 3, class: "forest-label" }, svg).textContent = p.label;
+    const sub = el("text", { x: 0, y: cy + 14, class: "forest-sub" }, svg);
+    if (p.error) {
+      sub.textContent = "Not available for this budget";
+      el("text", { x: m.l, y: cy + 4, class: "forest-sub" }, svg).textContent = "Budget exceeds what the data has seen; see note below.";
+      return;
+    }
+    sub.textContent = p.extrapolated.length ? "extrapolates beyond the data" : "within observed spend";
+    const pr = p.prediction;
+    const g = el("g", {}, svg);
+    el("line", { x1: sx(pr.low), x2: sx(pr.high), y1: cy, y2: cy, style: "stroke:var(--text-2);stroke-width:1.5" }, g);
+    for (const v of [pr.low, pr.high]) {
+      el("line", { x1: sx(v), x2: sx(v), y1: cy - 6, y2: cy + 6, style: "stroke:var(--text-2);stroke-width:1.5" }, g);
+    }
+    el("rect", { x: sx(pr.mean_low), y: cy - 8, width: Math.max(3, sx(pr.mean_high) - sx(pr.mean_low)), height: 16, rx: 8,
+      style: `fill:${st.color};fill-opacity:.4;stroke:${st.color};stroke-width:1.5;stroke-dasharray:${st.dash}` }, g);
+    el("circle", { cx: sx(pr.mean), cy, r: 6, style: `fill:${st.color};stroke:var(--card);stroke-width:2.5` }, g);
+    el("text", { x: sx(pr.high) + 10, y: cy + 4, class: "forest-label" }, svg).textContent = fmt(pr.mean);
+    const hit = el("rect", { x: m.l, y: cy - rowH / 2 + 4, width: iw, height: rowH - 8, style: "fill:transparent" }, svg);
+    hit.addEventListener("mousemove", (e) => showTip(`<div><b>${esc(p.label)}</b></div>
+      <div class="tt-row">Expected ${esc(state.ds.target)}<b>${fmt(pr.mean)} ${esc(yu)}</b></div>
+      <div class="tt-row">95% bound (expected)<b>${fmt(pr.mean_low)} – ${fmt(pr.mean_high)}</b></div>
+      <div class="tt-row">95% range (one market)<b>${fmt(pr.low)} – ${fmt(pr.high)}</b></div>`, e));
+    hit.addEventListener("mouseleave", hideTip);
+  });
+}
+
+function renderGains(r) {
+  const yu = state.ds.sales_unit;
+  const withGain = r.plans.filter((p) => p.gain);
+  const lo = Math.min(0, ...withGain.map((p) => p.gain.low)), hi = Math.max(1e-9, ...withGain.map((p) => p.gain.high));
+  const sign = (v) => (v >= 0 ? "+" : "") + fmt(v);
+  const pct = (v) => (v === null || v === undefined ? "" : `${v >= 0 ? "+" : ""}${(v * 100).toFixed(0)}%`);
+  $("#gains").innerHTML = r.plans.slice(1).map((p) => {
+    if (p.error) {
+      return `<div class="gain"><div class="gain-head"><span class="gain-title">${esc(p.label)}</span>
+        <span class="tag risky">${icon("alert")}Not available</span></div><p class="gain-alloc">${esc(p.error)}</p></div>`;
+    }
+    const g = p.gain, W = 260, H = 26, sx = (v) => 6 + ((v - lo) / (hi - lo)) * (W - 12), st = PLAN_STYLE[p.key];
+    const bar = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Gain bound from ${fmt(g.low)} to ${fmt(g.high)}">
+      <line x1="${sx(lo)}" x2="${sx(hi)}" y1="13" y2="13" style="stroke:var(--grid);stroke-width:6;stroke-linecap:round"/>
+      <line x1="${sx(0)}" x2="${sx(0)}" y1="3" y2="23" style="stroke:var(--muted);stroke-dasharray:2 2"/>
+      <rect x="${sx(g.low)}" y="7" width="${Math.max(3, sx(g.high) - sx(g.low))}" height="12" rx="6"
+        style="fill:${st.color};fill-opacity:.45;stroke:${st.color};stroke-dasharray:${st.dash}"/>
+      <circle cx="${sx(g.value)}" cy="13" r="5.5" style="fill:${st.color};stroke:var(--card-2);stroke-width:2"/></svg>`;
+    const alloc = state.ds.channels.map((c) => `${c} ${money(p.allocation[c], { digits: 1 })}`).join(" · ");
+    return `<div class="gain ${p.key === "capped" ? "best" : ""}">
+      <div class="gain-head"><span class="gain-title">${esc(p.label)}</span>${extrapolationTag(p)}</div>
+      <div class="gain-value">${sign(g.value)}<sup> ${esc(yu)}</sup> <span class="pill ${g.value >= 0 ? "up" : "down"}">${pct(g.pct)}</span></div>
+      <div class="gain-bar">${bar}</div>
+      <div class="gain-range"><span>Worst case <b>${sign(g.low)}</b> (${pct(g.pct_low)})</span><span>Best case <b>${sign(g.high)}</b> (${pct(g.pct_high)})</span></div>
+      <p class="gain-alloc">${esc(alloc)}</p></div>`;
+  }).join("");
+}
+
 
 // ---------- optimizer view ----------
 function render(r) {

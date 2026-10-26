@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+from scipy import stats
 
 from . import metrics
 from .data import Dataset
@@ -146,8 +147,30 @@ class MixModel:
     def predict(self, alloc: dict[str, float]) -> dict:
         frame = self.results.get_prediction(self._design(alloc)).summary_frame(alpha=self.alpha)
         row = frame.iloc[0]
+        # low/high: where a single market would land (includes residual noise).
+        # mean_low/mean_high: where the *expected* sales lie (coefficient uncertainty only).
         return {"mean": float(row["mean"]), "low": float(row["obs_ci_lower"]), "high": float(row["obs_ci_upper"]),
+                "mean_low": float(row["mean_ci_lower"]), "mean_high": float(row["mean_ci_upper"]),
                 "interval": f"{int((1 - self.alpha) * 100)}% prediction interval"}
+
+    def gain(self, new: dict[str, float], base: dict[str, float]) -> dict:
+        """Expected sales change from `base` to `new`, with a worst/best-case confidence bound.
+
+        The intercept cancels, so the difference is d @ beta with d = f(new) - f(base); its variance is
+        d' Cov(beta) d. Comparing two plans this way is much tighter than subtracting two separate intervals,
+        because the shared uncertainty (intercept, common coefficients) cancels out. The bound covers
+        coefficient uncertainty only; it assumes the curve's shape holds, which is only checkable inside
+        the observed spend range.
+        """
+        d = (self._design(new) - self._design(base)).values[0]
+        value = float(d @ self.results.params.values)
+        se = float(np.sqrt(max(d @ self.results.cov_params().values @ d, 0.0)))
+        t = float(stats.t.ppf(1 - self.alpha / 2, self.results.df_resid))
+        base_mean = self.predict(base)["mean"]
+        pct = (lambda v: v / base_mean if base_mean > 0 else None)
+        return {"value": value, "low": value - t * se, "high": value + t * se, "se": se,
+                "pct": pct(value), "pct_low": pct(value - t * se), "pct_high": pct(value + t * se),
+                "interval": f"{int((1 - self.alpha) * 100)}% confidence bound"}
 
     def contributions(self, alloc: dict[str, float]) -> dict[str, float]:
         """Lift of each channel above the zero-spend baseline (the intercept)."""

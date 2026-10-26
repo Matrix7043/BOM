@@ -109,8 +109,16 @@ def _justify(model: MixModel, rep: dict, opt: dict) -> list[str]:
             f"Marginal ROI is equalised: at this split the next {fmt_money(1, su)} returns about {opt['lambda']:.4f} "
             f"{yu} in every unconstrained channel ({vals}). Moving money from one channel to another would therefore "
             "lose more than it gains, which is why this is the optimum.")
-    if opt["pinned"]:
-        lines.append("Channels held at a min/max constraint: " + ", ".join(opt["pinned"]) +
+    capped = opt.get("at_observed_cap", [])
+    if capped:
+        parts = ", ".join(f"{c} at {fmt_money(ch[c]['amount'], su)}" for c in capped)
+        lines.append(
+            f"Spend is capped at the highest level any row of the data actually spent, so every number stays inside "
+            f"what the model has seen. Channels held at that cap: {parts}. They would earn more with extra budget "
+            "(higher marginal ROI), but the model cannot vouch for spend levels it never observed.")
+    user_pinned = [c for c in opt["pinned"] if c not in capped]
+    if user_pinned:
+        lines.append("Channels held at a min/max constraint: " + ", ".join(user_pinned) +
                      ". Their marginal ROI can differ from the others because the constraint, not the model, sets their spend.")
 
     lift = rep["lift_total"]

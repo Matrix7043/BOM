@@ -60,7 +60,10 @@ def kkt_solution(transform: str, betas: np.ndarray, lo: np.ndarray, hi: np.ndarr
     return np.clip(x, lo, hi)
 
 
-def optimize_budget(model: MixModel, total_budget: float, bounds: dict[str, Bounds] | None = None) -> dict:
+def optimize_budget(model: MixModel, total_budget: float, bounds: dict[str, Bounds] | None = None,
+                    cap_to_observed: bool = False) -> dict:
+    """cap_to_observed: never put more into a channel than the most any row of the training data spent on it,
+    so every recommendation stays inside the range the model was actually fitted on."""
     ds_id = model.dataset.id
     bounds = bounds or {}
     stats = {s.name: s for s in model.channel_stats()}
@@ -94,7 +97,17 @@ def optimize_budget(model: MixModel, total_budget: float, bounds: dict[str, Boun
     hi = np.array([bounds.get(c, Bounds()).hi if bounds.get(c, Bounds()).hi is not None else remaining
                    for c in active])
     hi = np.minimum(hi, remaining)
-    if active and (lo.sum() > remaining + 1e-9 or hi.sum() < remaining - 1e-9):
+    observed_max = np.array([stats[c].train_max for c in active])
+    if cap_to_observed:
+        hi = np.minimum(hi, np.maximum(observed_max, lo))  # a user minimum above the observed max still wins
+    if active and lo.sum() > remaining + 1e-9:
+        raise OptimizationError("Constraints are infeasible: active channel minimums exceed the budget")
+    if active and hi.sum() < remaining - 1e-9:
+        if cap_to_observed:
+            raise OptimizationError(
+                f"With spend capped at observed levels, the significant channels ({', '.join(active)}) can absorb at "
+                f"most {hi.sum():,.1f}, less than the {remaining:,.1f} to allocate. Lower the budget or allow "
+                "extrapolation beyond the observed range.")
         raise OptimizationError("Constraints are infeasible: active channel min/max cannot sum to the budget")
 
     solver = {"method": "SLSQP", "success": True, "message": "no active channels", "iterations": 0,
@@ -157,6 +170,9 @@ def optimize_budget(model: MixModel, total_budget: float, bounds: dict[str, Boun
         "active": active,
         "excluded": excluded,
         "pinned": [c for c in active if c not in interior],
+        "cap_to_observed": cap_to_observed,
+        "at_observed_cap": [c for c, v, mx in zip(active, x_active, observed_max)
+                            if cap_to_observed and v >= mx - 1e-6],
         "solver": solver,
         "marginal_roi": mroi,
         "marginal_equalized": bool(spread < 0.01),

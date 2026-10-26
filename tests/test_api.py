@@ -74,3 +74,22 @@ def test_upload_rejects_bad_columns(client):
     r = client.post("/api/datasets", files={"file": ("x.csv", io.BytesIO(csv), "text/csv")},
                     data={"target": "b", "channels": "zzz"})
     assert r.status_code == 422
+
+
+def test_compare_endpoint_returns_three_plans_with_bounds(client):
+    r = client.post("/api/datasets/advertising/compare",
+                    json={"current": {"TV": 147.0, "Radio": 23.3, "Newspaper": 30.6}})
+    assert r.status_code == 200, r.text
+    plans = {p["key"]: p for p in r.json()["plans"]}
+    assert set(plans) == {"current", "capped", "uncapped"}
+    assert plans["current"]["gain"] is None
+    capped, uncapped = plans["capped"], plans["uncapped"]
+    assert capped["extrapolated"] == [] and uncapped["extrapolated"]
+    assert 0 < capped["gain"]["low"] < capped["gain"]["value"] < uncapped["gain"]["value"]
+    assert len(r.json()["summary"]) == 2
+
+
+def test_compare_reports_capped_plan_unavailable_for_huge_budget(client):
+    r = client.post("/api/datasets/advertising/compare", json={"current": {"TV": 800, "Radio": 100, "Newspaper": 100}})
+    plans = {p["key"]: p for p in r.json()["plans"]}
+    assert "error" in plans["capped"] and "gain" in plans["uncapped"]

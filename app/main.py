@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from . import metrics
 from .config import APP_VERSION, get_settings
 from .data import DatasetError, DatasetStore, parse_upload
-from .explain import explain_allocation
+from .explain import explain_allocation, fmt_money
 from .logging_setup import configure_logging, request_id_var
 from .model import MixModel
 from .optimizer import Bounds, OptimizationError, optimize_budget
@@ -147,10 +147,24 @@ class ChannelBounds(BaseModel):
 class OptimizeRequest(BaseModel):
     budget: float = Field(..., gt=0, description="Total budget, in the dataset's spend unit")
     constraints: dict[str, ChannelBounds] = Field(default_factory=dict)
+    cap_to_observed: bool = Field(False, description="Cap each channel at the highest spend seen in the data")
 
 
 class PredictRequest(BaseModel):
     allocation: dict[str, float]
+
+
+class CompareRequest(BaseModel):
+    current: dict[str, float] = Field(..., description="The split in use today; its total is the budget compared")
+
+
+def _clean_allocation(model: MixModel, allocation: dict[str, float]) -> dict[str, float]:
+    unknown = set(allocation) - set(model.channels)
+    if unknown:
+        raise OptimizationError(f"Unknown channels: {sorted(unknown)}")
+    if any(v < 0 for v in allocation.values()):
+        raise OptimizationError("Spend cannot be negative")
+    return {c: float(allocation.get(c, 0.0)) for c in model.channels}
 
 
 def _curves(model: MixModel, allocation: dict[str, float]) -> dict:
@@ -199,7 +213,7 @@ def optimize(dataset_id: str, req: OptimizeRequest):
     model = registry.get(dataset_id)
     bounds = {c: Bounds(b.min, b.max) for c, b in req.constraints.items()}
     try:
-        opt = optimize_budget(model, req.budget, bounds)
+        opt = optimize_budget(model, req.budget, bounds, cap_to_observed=req.cap_to_observed)
     except OptimizationError:
         metrics.OPTIMIZATIONS.labels(dataset_id, "rejected").inc()
         raise
@@ -217,12 +231,7 @@ def optimize(dataset_id: str, req: OptimizeRequest):
 def predict(dataset_id: str, req: PredictRequest):
     """Explain a user-proposed split and compare it with the optimum for the same total."""
     model = registry.get(dataset_id)
-    unknown = set(req.allocation) - set(model.channels)
-    if unknown:
-        raise OptimizationError(f"Unknown channels: {sorted(unknown)}")
-    if any(v < 0 for v in req.allocation.values()):
-        raise OptimizationError("Spend cannot be negative")
-    allocation = {c: float(req.allocation.get(c, 0.0)) for c in model.channels}
+    allocation = _clean_allocation(model, req.allocation)
     report = explain_allocation(model, allocation)
     total = sum(allocation.values())
     if total > 0:
@@ -235,6 +244,59 @@ def predict(dataset_id: str, req: PredictRequest):
         except OptimizationError:
             pass
     return {"dataset": dataset_id, **report, "curves": _curves(model, allocation)}
+
+
+@app.post("/api/datasets/{dataset_id}/compare")
+def compare(dataset_id: str, req: CompareRequest):
+    """Current split vs the optimum capped at observed spend vs the unconstrained optimum, same total budget.
+
+    Each plan carries the expected sales with its confidence bound, the single-market prediction interval,
+    and (for the optimised plans) the gain over the current split with a worst/best-case bound.
+    """
+    model = registry.get(dataset_id)
+    current = _clean_allocation(model, req.current)
+    total = sum(current.values())
+    if total <= 0:
+        raise OptimizationError("The current split must have a positive total")
+    stats = {s.name: s for s in model.channel_stats()}
+    su, yu = model.dataset.spend_unit, model.dataset.sales_unit
+
+    def plan(key: str, label: str, alloc: dict[str, float]) -> dict:
+        extrapolated = [{"channel": c, "amount": alloc[c], "observed_max": stats[c].train_max,
+                         "ratio": alloc[c] / stats[c].train_max if stats[c].train_max else None}
+                        for c in model.channels if alloc[c] > stats[c].train_max * 1.0001]
+        return {"key": key, "label": label, "allocation": alloc, "prediction": model.predict(alloc),
+                "extrapolated": extrapolated, "gain": None if key == "current" else model.gain(alloc, current)}
+
+    plans = [plan("current", "Current split", current)]
+    for key, label, cap in (("capped", "Optimal, within observed spend", True),
+                            ("uncapped", "Optimal, unconstrained", False)):
+        try:
+            plans.append(plan(key, label, optimize_budget(model, total, cap_to_observed=cap)["allocation"]))
+        except OptimizationError as exc:
+            plans.append({"key": key, "label": label, "error": str(exc)})
+
+    summary = []
+    for p in plans[1:]:
+        if "error" in p:
+            summary.append(f"{p['label']}: not available. {p['error']}")
+            continue
+        g = p["gain"]
+        pct = f" ({g['pct']:+.0%})" if g["pct"] is not None else ""
+        line = (f"{p['label']}: {g['value']:+,.2f} {yu}{pct} over the current split. Worst case {g['low']:+,.2f}, "
+                f"best case {g['high']:+,.2f} ({g['interval']}).")
+        if p["extrapolated"]:
+            worst = max(p["extrapolated"], key=lambda e: e["ratio"] or 0)
+            line += (f" It puts {worst['channel']} at {fmt_money(worst['amount'], su)}, {worst['ratio']:.1f}x the highest "
+                     f"spend in the data ({fmt_money(worst['observed_max'], su)}); the bound assumes the fitted curve "
+                     "keeps holding out there, which the data cannot confirm.")
+        else:
+            line += " Every channel stays within what some real market spent, so the bound rests on observed data."
+        summary.append(line)
+    log.info("plans compared", extra={"dataset": dataset_id, "budget": total,
+                                      "gains": {p["key"]: round(p["gain"]["value"], 3) for p in plans[1:] if p.get("gain")}})
+    return {"dataset": dataset_id, "budget": total, "plans": plans, "summary": summary,
+            "confidence": 1 - model.alpha}
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
